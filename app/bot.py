@@ -1,13 +1,9 @@
-import os
 from os import getenv
 import discord
 from discord import app_commands
 from discord.ext import commands
 import yt_dlp as youtube_dl
 import asyncio
-from dotenv import load_dotenv
-
-load_dotenv()
 
 discord.FFmpegOpusAudio.ffmpeg_executable = '/usr/bin/ffmpeg'
 
