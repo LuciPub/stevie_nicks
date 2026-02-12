@@ -1,8 +1,9 @@
+import asyncio
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from services.youtube import get_youtube_url
 from services.music import add_to_queue
-from utils.config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, MAX_PLAYLIST_TRACKS
+from utils.config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_MARKET, MAX_PLAYLIST_TRACKS
 
 
 sp = None
@@ -24,7 +25,7 @@ async def get_spotify_track(track_id):
     if not sp:
         return None
     try:
-        track = sp.track(track_id)
+        track = sp.track(track_id, market=SPOTIFY_MARKET)
         return _format_track(track)
     except Exception as e:
         print(f"Error fetching Spotify track: {e}")
@@ -44,16 +45,21 @@ async def get_spotify_playlist(playlist_id):
     if not sp:
         return []
     try:
-        results = sp.playlist_items(playlist_id)
-        tracks = _extract_tracks(results['items'])
-
-        while results['next'] and len(tracks) < 100:
-            results = sp.next(results)
+        tracks = []
+        offset = 0
+        while True:
+            results = sp.playlist_items(
+                playlist_id, limit=100, offset=offset, market=SPOTIFY_MARKET
+            )
             tracks.extend(_extract_tracks(results['items']))
+            if not results['next']:
+                break
+            offset += 100
 
+        print(f"✅ Loaded {len(tracks)} tracks from playlist")
         return tracks
     except Exception as e:
-        print(f"Error fetching Spotify playlist: {e}")
+        print(f"Error fetching Spotify playlist {playlist_id}: {e}")
         return []
 
 
@@ -61,30 +67,55 @@ async def get_spotify_album(album_id):
     if not sp:
         return []
     try:
-        results = sp.album_tracks(album_id)
+        results = sp.album_tracks(album_id, limit=50, market=SPOTIFY_MARKET)
         tracks = _extract_tracks(results['items'])
 
         while results['next']:
             results = sp.next(results)
             tracks.extend(_extract_tracks(results['items']))
 
+        print(f"✅ Loaded {len(tracks)} tracks from album")
         return tracks
     except Exception as e:
-        print(f"Error fetching Spotify album: {e}")
+        print(f"Error fetching Spotify album {album_id}: {e}")
         return []
+
+
+async def _resolve_track(track):
+    try:
+        youtube_info = await get_youtube_url(track['search_query'])
+        if youtube_info:
+            return {
+                'url': youtube_info['url'],
+                'title': track['title'],
+                'webpage_url': youtube_info.get('webpage_url')
+            }
+    except Exception as e:
+        print(f"Error processing track {track['title']}: {e}")
+    return None
 
 
 async def process_spotify_tracks(tracks, guild_id, channel):
     max_tracks = min(MAX_PLAYLIST_TRACKS, len(tracks))
+    batch_size = 5
+    processed = 0
+    failed = 0
 
-    for track in tracks[:max_tracks]:
-        try:
-            youtube_info = await get_youtube_url(track['search_query'])
-            if youtube_info:
-                add_to_queue(guild_id, {
-                    'url': youtube_info['url'],
-                    'title': track['title'],
-                    'webpage_url': youtube_info.get('webpage_url')
-                })
-        except Exception as e:
-            print(f"Error processing track {track['title']}: {e}")
+    for i in range(0, max_tracks, batch_size):
+        batch = tracks[i:i + batch_size]
+        results = await asyncio.gather(
+            *[_resolve_track(t) for t in batch],
+            return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, Exception) or result is None:
+                failed += 1
+            else:
+                add_to_queue(guild_id, result)
+                processed += 1
+
+    if processed > 0 or failed > 0:
+        status = f"✅ {processed} tracks added to queue"
+        if failed > 0:
+            status += f" ({failed} failed)"
+        await channel.send(status, delete_after=10)

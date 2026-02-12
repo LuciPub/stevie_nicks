@@ -85,6 +85,8 @@ def register_commands(bot):
 
                 elif pattern_type == 'playlist':
                     tracks = await get_spotify_playlist(item_id)
+                    if not tracks:
+                        return await interaction.followup.send("❌ Failed to load playlist")
                     song, msg = await _handle_spotify_collection(tracks, guild_id, interaction.channel)
                     if not song:
                         return await interaction.followup.send(msg)
@@ -92,6 +94,8 @@ def register_commands(bot):
 
                 elif pattern_type == 'album':
                     tracks = await get_spotify_album(item_id)
+                    if not tracks:
+                        return await interaction.followup.send("❌ Failed to load album")
                     song, msg = await _handle_spotify_collection(tracks, guild_id, interaction.channel)
                     if not song:
                         return await interaction.followup.send(msg)

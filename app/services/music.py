@@ -8,6 +8,8 @@ queues = {}
 current_tracks = {}
 _play_events = {}
 _player_tasks = {}
+_inactivity_tasks = {}
+INACTIVITY_TIMEOUT = 300
 
 
 def parse_time(time_str):
@@ -53,6 +55,7 @@ async def start_player(voice_client, track, guild_id, channel):
             add_to_queue(guild_id, track)
             return
 
+    _cancel_inactivity_timer(guild_id)
     _player_tasks[guild_id] = asyncio.create_task(
         _player_loop(voice_client, track, guild_id, channel)
     )
@@ -91,6 +94,8 @@ async def _player_loop(voice_client, first_track, guild_id, channel):
     if guild_id in _player_tasks:
         del _player_tasks[guild_id]
 
+    _start_inactivity_timer(voice_client, guild_id)
+
 
 def _on_track_end(error, guild_id, loop):
     if error:
@@ -120,3 +125,30 @@ def clear_queue(guild_id):
         del _player_tasks[guild_id]
     if guild_id in _play_events:
         _play_events[guild_id].set()
+    _cancel_inactivity_timer(guild_id)
+
+
+def _cancel_inactivity_timer(guild_id):
+    if guild_id in _inactivity_tasks:
+        _inactivity_tasks[guild_id].cancel()
+        del _inactivity_tasks[guild_id]
+
+
+def _start_inactivity_timer(voice_client, guild_id):
+    _cancel_inactivity_timer(guild_id)
+    _inactivity_tasks[guild_id] = asyncio.create_task(
+        _inactivity_disconnect(voice_client, guild_id)
+    )
+
+
+async def _inactivity_disconnect(voice_client, guild_id):
+    try:
+        await asyncio.sleep(INACTIVITY_TIMEOUT)
+        if voice_client.is_connected():
+            await voice_client.disconnect()
+            print(f"⏱️ Disconnected from guild {guild_id} due to inactivity")
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if guild_id in _inactivity_tasks:
+            del _inactivity_tasks[guild_id]
