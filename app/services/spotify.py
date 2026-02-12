@@ -83,7 +83,8 @@ async def process_spotify_tracks(tracks, guild_id, channel):
             if youtube_info:
                 add_to_queue(guild_id, {
                     'url': youtube_info['url'],
-                    'title': track['title']
+                    'title': track['title'],
+                    'webpage_url': youtube_info.get('webpage_url')
                 })
         except Exception as e:
             print(f"Error processing track {track['title']}: {e}")

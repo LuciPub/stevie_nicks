@@ -14,13 +14,17 @@ SPOTIFY_PATTERNS = {
 }
 
 YDL_OPTS = {
-    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+    'format': 'bestaudio[ext=m4a]/bestaudio[protocol^=http]/bestaudio/best',
     'quiet': True,
     'no_warnings': True,
     'noplaylist': True,
     'default_search': 'ytsearch',
-    'socket_timeout': 10,
-    'retries': 5,
+    'socket_timeout': 15,
+    'retries': 3,
+    'extract_flat': False,
+    'nocheckcertificate': False,
+    'http_chunk_size': 10485760,
+    'prefer_free_formats': False,
 }
 
 FFMPEG_OPTIONS = {

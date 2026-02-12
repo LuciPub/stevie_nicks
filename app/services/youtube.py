@@ -8,6 +8,65 @@ def _extract_info(yt_query):
         return ydl.extract_info(yt_query, download=False)
 
 
+async def _extract_with_timeout(yt_query, timeout=30):
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_extract_info, yt_query),
+            timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        raise Exception(f"Extraction timed out after {timeout}s")
+
+
+def _get_best_audio_url(info):
+    """Extract best audio URL from yt-dlp info, preferring direct URLs over HLS"""
+    if 'formats' in info:
+        direct_formats = []
+        hls_formats = []
+
+        for fmt in info['formats']:
+            if fmt.get('acodec') == 'none':
+                continue
+
+            url = fmt.get('url', '')
+            if not url:
+                continue
+
+            if '.m3u8' in url or 'hls' in fmt.get('protocol', ''):
+                hls_formats.append(fmt)
+            else:
+                direct_formats.append(fmt)
+
+        if direct_formats:
+            direct_formats.sort(key=lambda f: f.get('abr', 0) or f.get('tbr', 0), reverse=True)
+            best_url = direct_formats[0]['url']
+            print(f"Selected direct format: {direct_formats[0].get('format_id')} ({direct_formats[0].get('abr', 0)}kbps)")
+            return best_url
+
+        if hls_formats:
+            hls_formats.sort(key=lambda f: f.get('abr', 0) or f.get('tbr', 0), reverse=True)
+            best_url = hls_formats[0]['url']
+            print(f"⚠️ Using HLS format: {hls_formats[0].get('format_id')} ({hls_formats[0].get('abr', 0)}kbps)")
+            return best_url
+
+    fallback = info.get('url')
+    if fallback:
+        print(f"⚠️ Using fallback URL from info['url']")
+    return fallback
+
+
+async def refresh_url(webpage_url):
+    """Re-extract URL from webpage_url (for expired streams)"""
+    try:
+        info = await _extract_with_timeout(webpage_url)
+        url = _get_best_audio_url(info)
+        if url:
+            return url
+    except Exception as e:
+        print(f"Error refreshing URL: {e}")
+    return None
+
+
 async def get_youtube_url(search_query):
     """Convert a search query to a YouTube URL and title"""
 
@@ -18,8 +77,7 @@ async def get_youtube_url(search_query):
     )
 
     try:
-        # 🔥 roda em thread separada
-        info = await asyncio.to_thread(_extract_info, yt_query)
+        info = await _extract_with_timeout(yt_query)
 
         if 'entries' in info:
             entries = info['entries']
@@ -40,9 +98,15 @@ async def get_youtube_url(search_query):
             else:
                 info = entries[0]
 
+        url = _get_best_audio_url(info)
+
+        if not url:
+            raise ValueError("No valid stream URL found")
+
         return {
-            'url': info['url'],
-            'title': info['title']
+            'url': url,
+            'title': info['title'],
+            'webpage_url': info.get('webpage_url', yt_query)
         }
 
     except Exception as e:

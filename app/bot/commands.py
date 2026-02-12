@@ -2,34 +2,22 @@ import discord
 import asyncio
 import os
 
-from services.music import add_to_queue, check_queue, clear_queue, play_track, parse_time, queues, current_tracks
+from services.music import add_to_queue, start_player, clear_queue, parse_time, queues, current_tracks
 from services.youtube import get_youtube_url
 from services.spotify import get_spotify_track, get_spotify_playlist, get_spotify_album, process_spotify_tracks
 from utils.audio import create_clip, download_audio, cleanup_temp_dir
 from utils.config import SPOTIFY_PATTERNS, MAX_QUEUE_DISPLAY, MAX_CLIP_LENGTH, MAX_FILE_SIZE
 
 
-def _get_loop(voice_client):
-    return voice_client.loop if hasattr(voice_client, 'loop') else asyncio.get_event_loop()
-
-
-def _create_after_callback(voice_client, guild_id, channel):
-    def callback(e):
-        if e:
-            print(f'Player error: {e}')
-        try:
-            asyncio.run_coroutine_threadsafe(check_queue(
-                guild_id, channel), _get_loop(voice_client))
-        except Exception as err:
-            print(f"Error scheduling queue check: {err}")
-    return callback
-
-
 async def _get_first_valid_track(tracks):
     for i, track in enumerate(tracks[:2]):
         info = await get_youtube_url(track['search_query'])
         if info:
-            return {'url': info['url'], 'title': track['title']}, tracks[i+1:]
+            return {
+                'url': info['url'],
+                'title': track['title'],
+                'webpage_url': info.get('webpage_url')
+            }, tracks[i+1:]
     return None, []
 
 
@@ -52,7 +40,7 @@ def register_commands(bot):
     @bot.tree.command(name="play", description="Play audio from URL or search")
     @discord.app_commands.describe(query="URL or search term")
     async def play(interaction: discord.Interaction, query: str):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         if not interaction.user.voice:
             return await interaction.followup.send("❌ Join a voice channel first")
@@ -89,8 +77,11 @@ def register_commands(bot):
                     if not youtube_info:
                         return await interaction.followup.send("❌ Couldn't find track")
 
-                    song = {'url': youtube_info['url'],
-                            'title': track_info['title']}
+                    song = {
+                        'url': youtube_info['url'],
+                        'title': track_info['title'],
+                        'webpage_url': youtube_info.get('webpage_url')
+                    }
 
                 elif pattern_type == 'playlist':
                     tracks = await get_spotify_playlist(item_id)
@@ -118,31 +109,25 @@ def register_commands(bot):
             add_to_queue(guild_id, song)
             await interaction.followup.send(f"✅ Added to queue: **{song['title']}**")
         else:
-            source = await play_track(voice_client, song, guild_id)
-            if source:
-                voice_client.play(source, after=_create_after_callback(
-                    voice_client, guild_id, interaction.channel))
-                await interaction.followup.send(f"🎵 Now playing: **{song['title']}**")
-            else:
-                await interaction.followup.send("❌ Error playing track")
+            await start_player(voice_client, song, guild_id, interaction.channel)
 
     @bot.tree.command(name="stop", description="Stop playback and clear queue")
     async def stop(interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         voice_client = interaction.guild.voice_client
 
         if voice_client:
+            clear_queue(interaction.guild_id)
             if voice_client.is_playing() or voice_client.is_paused():
                 voice_client.stop()
             await voice_client.disconnect()
-            clear_queue(interaction.guild_id)
             await interaction.followup.send("⏹️ Stopped and cleared queue")
         else:
             await interaction.followup.send("❌ Not in a voice channel")
 
     @bot.tree.command(name="skip", description="Skip to next song")
     async def skip(interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         voice_client = interaction.guild.voice_client
 
         if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
@@ -153,7 +138,7 @@ def register_commands(bot):
 
     @bot.tree.command(name="queue", description="Show current queue")
     async def queue_cmd(interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         guild_id = interaction.guild_id
 
         if guild_id in queues and queues[guild_id]:
@@ -175,7 +160,7 @@ def register_commands(bot):
 
     @bot.tree.command(name="pause", description="Pause playback")
     async def pause(interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         voice_client = interaction.guild.voice_client
 
         if voice_client and voice_client.is_playing():
@@ -186,7 +171,7 @@ def register_commands(bot):
 
     @bot.tree.command(name="resume", description="Resume playback")
     async def resume(interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         voice_client = interaction.guild.voice_client
 
         if voice_client and voice_client.is_paused():
@@ -198,7 +183,7 @@ def register_commands(bot):
     @bot.tree.command(name="seek", description="Jump to position in song")
     @discord.app_commands.describe(position="Time position (seconds or mm:ss)")
     async def seek(interaction: discord.Interaction, position: str):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         voice_client = interaction.guild.voice_client
         guild_id = interaction.guild_id
 
@@ -207,10 +192,11 @@ def register_commands(bot):
             song = current_tracks[guild_id]
 
             try:
-                source = await discord.FFmpegOpusAudio.from_probe(
+                source = discord.FFmpegPCMAudio(
                     song['url'],
-                    before_options=f"-reconnect 1 -ss {pos_sec}",
+                    before_options=f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {pos_sec}",
                     options="-vn",
+                    executable='/usr/bin/ffmpeg'
                 )
                 voice_client.stop()
                 voice_client.play(source)
@@ -222,12 +208,12 @@ def register_commands(bot):
 
     @bot.tree.command(name="ping", description="Check bot latency")
     async def ping(interaction: discord.Interaction):
-        await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms")
+        await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms", ephemeral=True)
 
     @bot.tree.command(name="cut", description="Cut a section of current song")
     @discord.app_commands.describe(start="Start time (seconds or mm:ss)", end="End time (seconds or mm:ss)")
     async def cut(interaction: discord.Interaction, start: str, end: str):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         voice_client = interaction.guild.voice_client
         guild_id = interaction.guild_id
 
@@ -269,7 +255,7 @@ def register_commands(bot):
     @bot.tree.command(name="download", description="Download audio")
     @discord.app_commands.describe(query="URL or search term")
     async def download_cmd(interaction: discord.Interaction, query: str):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         spotify_track_match = SPOTIFY_PATTERNS['track'].match(query)
 

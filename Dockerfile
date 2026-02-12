@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     libffi-dev \
     libnacl-dev \
     libsodium-dev \
+    ca-certificates \
     git \
     gcc \
     && apt-get clean \

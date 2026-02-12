@@ -1,10 +1,13 @@
 import discord
 import asyncio
 from utils.config import FFMPEG_OPTIONS, FFMPEG_PATH
+from services.youtube import refresh_url
 
 
 queues = {}
 current_tracks = {}
+_play_events = {}
+_player_tasks = {}
 
 
 def parse_time(time_str):
@@ -14,84 +17,106 @@ def parse_time(time_str):
     return int(time_str)
 
 
-async def play_track(voice_client, track, guild_id):
-    """Play a track in the voice channel"""
-    try:
-        source = await discord.FFmpegOpusAudio.from_probe(
-            track['url'],
-            **FFMPEG_OPTIONS,
-            executable=FFMPEG_PATH
-        )
-        current_tracks[guild_id] = track
-        return source
-    except Exception as e:
-        print(f"Error playing track: {e}")
-        return None
-
-
-async def check_queue(guild_id, channel):
-    """Check and play the next song in queue"""
-    if guild_id in queues and queues[guild_id]:
-        next_song = queues[guild_id].pop(0)
-        voice_client = discord.utils.get(
-            channel.guild.voice_clients, guild=channel.guild)
-
-        if not voice_client or not voice_client.is_connected():
-            clear_queue(guild_id)
-            return False
-
+async def _create_source(track):
+    url = track['url']
+    for attempt in range(2):
         try:
-            source = await discord.FFmpegOpusAudio.from_probe(
-                next_song['url'],
-                **FFMPEG_OPTIONS,
-                executable=FFMPEG_PATH
+            return discord.FFmpegPCMAudio(
+                url, **FFMPEG_OPTIONS, executable=FFMPEG_PATH
             )
-            current_tracks[guild_id] = next_song
-
-            def after_callback(e):
-                if e:
-                    print(f'Player error: {e}')
-
-                # Get the current event loop from the bot
-                try:
-                    loop = voice_client.loop if hasattr(
-                        voice_client, 'loop') else asyncio.new_event_loop()
-                    asyncio.run_coroutine_threadsafe(
-                        check_queue(guild_id, channel), loop)
-                except Exception as loop_error:
-                    print(f"Error scheduling next track: {loop_error}")
-
-            voice_client.play(source, after=after_callback)
-            await channel.send(f"🎵 Now playing: **{next_song['title']}**")
-            return True
         except Exception as e:
-            print(f"Error playing next track: {e}")
-            # Try to play next song in queue if current failed
-            try:
-                loop = voice_client.loop if hasattr(
-                    voice_client, 'loop') else asyncio.new_event_loop()
-                asyncio.run_coroutine_threadsafe(
-                    check_queue(guild_id, channel), loop)
-            except:
-                pass
-            return False
-    else:
-        # Queue is empty, cleanup
-        if guild_id in current_tracks:
-            del current_tracks[guild_id]
-    return False
+            print(f"FFmpegPCMAudio attempt {attempt + 1} failed: {e}")
+            if attempt == 0 and 'webpage_url' in track:
+                new_url = await refresh_url(track['webpage_url'])
+                if new_url:
+                    track['url'] = new_url
+                    url = new_url
+                    continue
+    return None
+
+
+def _get_event(guild_id):
+    if guild_id not in _play_events:
+        _play_events[guild_id] = asyncio.Event()
+    return _play_events[guild_id]
+
+
+def signal_next(guild_id):
+    if guild_id in _play_events:
+        _play_events[guild_id].set()
+
+
+async def start_player(voice_client, track, guild_id, channel):
+    if guild_id in _player_tasks:
+        task = _player_tasks[guild_id]
+        if not task.done():
+            add_to_queue(guild_id, track)
+            return
+
+    _player_tasks[guild_id] = asyncio.create_task(
+        _player_loop(voice_client, track, guild_id, channel)
+    )
+
+
+async def _player_loop(voice_client, first_track, guild_id, channel):
+    event = _get_event(guild_id)
+    loop = asyncio.get_running_loop()
+    track = first_track
+
+    while track:
+        source = await _create_source(track)
+        if not source:
+            print(f"Failed to create source for: {track.get('title')}")
+            track = _next_track(guild_id)
+            continue
+
+        current_tracks[guild_id] = track
+        event.clear()
+
+        voice_client.play(
+            source,
+            after=lambda e, gid=guild_id, lp=loop: _on_track_end(e, gid, lp)
+        )
+        await channel.send(f"🎵 Now playing: **{track['title']}**")
+
+        await event.wait()
+
+        if not voice_client.is_connected():
+            break
+
+        track = _next_track(guild_id)
+
+    if guild_id in current_tracks:
+        del current_tracks[guild_id]
+    if guild_id in _player_tasks:
+        del _player_tasks[guild_id]
+
+
+def _on_track_end(error, guild_id, loop):
+    if error:
+        print(f"Player error: {error}")
+    loop.call_soon_threadsafe(_play_events[guild_id].set)
+
+
+def _next_track(guild_id):
+    if guild_id in queues and queues[guild_id]:
+        return queues[guild_id].pop(0)
+    return None
 
 
 def add_to_queue(guild_id, track):
-    """Add a track to the queue"""
     if guild_id not in queues:
         queues[guild_id] = []
     queues[guild_id].append(track)
 
 
 def clear_queue(guild_id):
-    """Clear the queue for a guild"""
     if guild_id in queues:
         del queues[guild_id]
     if guild_id in current_tracks:
         del current_tracks[guild_id]
+    if guild_id in _player_tasks:
+        _player_tasks[guild_id].cancel()
+        del _player_tasks[guild_id]
+    if guild_id in _play_events:
+        _play_events[guild_id].set()
