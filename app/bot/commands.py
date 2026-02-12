@@ -256,35 +256,49 @@ def register_commands(bot):
             if 'temp_dir' in locals():
                 cleanup_temp_dir(temp_dir)
 
-    @bot.tree.command(name="download", description="Download audio")
-    @discord.app_commands.describe(query="URL or search term")
-    async def download_cmd(interaction: discord.Interaction, query: str):
+    @bot.tree.command(name="download", description="Download current song or from URL/search")
+    @discord.app_commands.describe(query="URL or search term (leave empty to download current song)")
+    async def download_cmd(interaction: discord.Interaction, query: str = None):
         await interaction.response.defer(ephemeral=True)
 
-        spotify_track_match = SPOTIFY_PATTERNS['track'].match(query)
+        guild_id = interaction.guild_id
 
-        if spotify_track_match:
-            track_id = spotify_track_match.group(1)
-            track_info = await get_spotify_track(track_id)
+        if not query:
+            voice_client = interaction.guild.voice_client
+            if not voice_client or not voice_client.is_connected():
+                return await interaction.followup.send("❌ Not connected to a voice channel")
 
-            if not track_info:
-                return await interaction.followup.send("❌ Failed to fetch track")
+            if guild_id not in current_tracks:
+                return await interaction.followup.send("❌ Nothing playing")
 
-            youtube_info = await get_youtube_url(track_info['search_query'])
-
-            if not youtube_info:
-                return await interaction.followup.send("❌ Couldn't find track")
-
-            url = youtube_info['url']
-            title = track_info['title']
+            track = current_tracks[guild_id]
+            url = track['url']
+            title = track['title']
         else:
-            youtube_info = await get_youtube_url(query)
+            spotify_track_match = SPOTIFY_PATTERNS['track'].match(query)
 
-            if not youtube_info:
-                return await interaction.followup.send("❌ Nothing found")
+            if spotify_track_match:
+                track_id = spotify_track_match.group(1)
+                track_info = await get_spotify_track(track_id)
 
-            url = youtube_info['url']
-            title = youtube_info['title']
+                if not track_info:
+                    return await interaction.followup.send("❌ Failed to fetch track")
+
+                youtube_info = await get_youtube_url(track_info['search_query'])
+
+                if not youtube_info:
+                    return await interaction.followup.send("❌ Couldn't find track")
+
+                url = youtube_info['url']
+                title = track_info['title']
+            else:
+                youtube_info = await get_youtube_url(query)
+
+                if not youtube_info:
+                    return await interaction.followup.send("❌ Nothing found")
+
+                url = youtube_info['url']
+                title = youtube_info['title']
 
         await interaction.followup.send("⏳ Downloading...")
 
@@ -365,5 +379,5 @@ def register_commands(bot):
         await cut(TextInteraction(ctx), start, end)
 
     @bot.command(name="download")
-    async def download_text(ctx, *, query: str):
+    async def download_text(ctx, *, query: str = None):
         await download_cmd(TextInteraction(ctx), query)
