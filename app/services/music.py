@@ -54,7 +54,8 @@ async def check_queue(guild_id, channel):
 
                 # Get the current event loop from the bot
                 try:
-                    loop = voice_client.loop if hasattr(voice_client, 'loop') else asyncio.new_event_loop()
+                    loop = voice_client.loop if hasattr(
+                        voice_client, 'loop') else asyncio.new_event_loop()
                     asyncio.run_coroutine_threadsafe(
                         check_queue(guild_id, channel), loop)
                 except Exception as loop_error:
@@ -67,7 +68,8 @@ async def check_queue(guild_id, channel):
             print(f"Error playing next track: {e}")
             # Try to play next song in queue if current failed
             try:
-                loop = voice_client.loop if hasattr(voice_client, 'loop') else asyncio.new_event_loop()
+                loop = voice_client.loop if hasattr(
+                    voice_client, 'loop') else asyncio.new_event_loop()
                 asyncio.run_coroutine_threadsafe(
                     check_queue(guild_id, channel), loop)
             except:

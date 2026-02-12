@@ -27,7 +27,8 @@ def create_bot():
             from services.music import clear_queue
             if before.channel.guild:
                 clear_queue(before.channel.guild.id)
-                print(f"🧹 Cleaned up queue for guild {before.channel.guild.id}")
+                print(
+                    f"🧹 Cleaned up queue for guild {before.channel.guild.id}")
 
     from bot.commands import register_commands
     register_commands(bot)

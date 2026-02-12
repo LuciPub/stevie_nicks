@@ -14,24 +14,13 @@ SPOTIFY_PATTERNS = {
 }
 
 YDL_OPTS = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[ext=m4a]/bestaudio/best',
     'quiet': True,
     'no_warnings': True,
-    'user_agent': 'Mozilla/5.0',
-    'cookiefile': 'cookies.txt',
+    'noplaylist': True,
+    'default_search': 'ytsearch',
     'socket_timeout': 10,
     'retries': 5,
-    'nocheckcertificate': True,
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'opus',
-        'preferredquality': '192',
-    }],
-    'youtube': {
-        'player_client': 'android',
-        'allow_oauth': 'true',
-        'skip': ['dash', 'hls'],
-    }
 }
 
 FFMPEG_OPTIONS = {

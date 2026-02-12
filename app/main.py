@@ -1,6 +1,7 @@
 from os import getenv
 from bot.client import create_bot
 
+
 if __name__ == "__main__":
     token = getenv("DISCORD__TOKEN")
     if not token:

@@ -18,7 +18,8 @@ def _create_after_callback(voice_client, guild_id, channel):
         if e:
             print(f'Player error: {e}')
         try:
-            asyncio.run_coroutine_threadsafe(check_queue(guild_id, channel), _get_loop(voice_client))
+            asyncio.run_coroutine_threadsafe(check_queue(
+                guild_id, channel), _get_loop(voice_client))
         except Exception as err:
             print(f"Error scheduling queue check: {err}")
     return callback
@@ -41,7 +42,8 @@ async def _handle_spotify_collection(tracks, guild_id, channel):
         return None, "❌ Cannot find tracks"
 
     if remaining:
-        asyncio.create_task(process_spotify_tracks(remaining, guild_id, channel))
+        asyncio.create_task(process_spotify_tracks(
+            remaining, guild_id, channel))
 
     return song, f"✅ Found {len(tracks)} tracks"
 
@@ -87,7 +89,8 @@ def register_commands(bot):
                     if not youtube_info:
                         return await interaction.followup.send("❌ Couldn't find track")
 
-                    song = {'url': youtube_info['url'], 'title': track_info['title']}
+                    song = {'url': youtube_info['url'],
+                            'title': track_info['title']}
 
                 elif pattern_type == 'playlist':
                     tracks = await get_spotify_playlist(item_id)
@@ -117,7 +120,8 @@ def register_commands(bot):
         else:
             source = await play_track(voice_client, song, guild_id)
             if source:
-                voice_client.play(source, after=_create_after_callback(voice_client, guild_id, interaction.channel))
+                voice_client.play(source, after=_create_after_callback(
+                    voice_client, guild_id, interaction.channel))
                 await interaction.followup.send(f"🎵 Now playing: **{song['title']}**")
             else:
                 await interaction.followup.send("❌ Error playing track")
@@ -162,7 +166,8 @@ def register_commands(bot):
 
             remaining = len(queues[guild_id]) - MAX_QUEUE_DISPLAY
             if remaining > 0:
-                embed.add_field(name="", value=f"*And {remaining} more...*", inline=False)
+                embed.add_field(
+                    name="", value=f"*And {remaining} more...*", inline=False)
 
             await interaction.followup.send(embed=embed)
         else:
@@ -251,7 +256,8 @@ def register_commands(bot):
                 return await interaction.followup.send(f"❌ Failed to create clip: {temp_dir}")
 
             clip_duration = end_sec - start_sec
-            file = discord.File(output_path, filename=f"clip_{clip_duration}s.mp3")
+            file = discord.File(
+                output_path, filename=f"clip_{clip_duration}s.mp3")
             await interaction.followup.send("✅ Here's your clip!", file=file)
 
         except Exception as e:
