@@ -2,20 +2,48 @@ import discord
 import asyncio
 import os
 
-from services.music import (
-    add_to_queue, check_queue, clear_queue,
-    play_track, parse_time, queues, current_tracks
-)
+from services.music import add_to_queue, check_queue, clear_queue, play_track, parse_time, queues, current_tracks
 from services.youtube import get_youtube_url
-from services.spotify import (
-    get_spotify_track, get_spotify_playlist,
-    get_spotify_album, process_spotify_tracks
-)
+from services.spotify import get_spotify_track, get_spotify_playlist, get_spotify_album, process_spotify_tracks
 from utils.audio import create_clip, download_audio, cleanup_temp_dir
-from utils.config import (
-    SPOTIFY_PATTERNS, MAX_QUEUE_DISPLAY,
-    MAX_CLIP_LENGTH, MAX_FILE_SIZE
-)
+from utils.config import SPOTIFY_PATTERNS, MAX_QUEUE_DISPLAY, MAX_CLIP_LENGTH, MAX_FILE_SIZE
+
+
+def _get_loop(voice_client):
+    return voice_client.loop if hasattr(voice_client, 'loop') else asyncio.get_event_loop()
+
+
+def _create_after_callback(voice_client, guild_id, channel):
+    def callback(e):
+        if e:
+            print(f'Player error: {e}')
+        try:
+            asyncio.run_coroutine_threadsafe(check_queue(guild_id, channel), _get_loop(voice_client))
+        except Exception as err:
+            print(f"Error scheduling queue check: {err}")
+    return callback
+
+
+async def _get_first_valid_track(tracks):
+    for i, track in enumerate(tracks[:2]):
+        info = await get_youtube_url(track['search_query'])
+        if info:
+            return {'url': info['url'], 'title': track['title']}, tracks[i+1:]
+    return None, []
+
+
+async def _handle_spotify_collection(tracks, guild_id, channel):
+    if not tracks:
+        return None, "❌ Empty or invalid collection"
+
+    song, remaining = await _get_first_valid_track(tracks)
+    if not song:
+        return None, "❌ Cannot find tracks"
+
+    if remaining:
+        asyncio.create_task(process_spotify_tracks(remaining, guild_id, channel))
+
+    return song, f"✅ Found {len(tracks)} tracks"
 
 
 def register_commands(bot):
@@ -44,106 +72,56 @@ def register_commands(bot):
         guild_id = interaction.guild_id
         await interaction.followup.send("🔍 Searching...")
 
-        spotify_track_match = SPOTIFY_PATTERNS['track'].match(query)
-        spotify_playlist_match = SPOTIFY_PATTERNS['playlist'].match(query)
-        spotify_album_match = SPOTIFY_PATTERNS['album'].match(query)
+        song = None
+        for pattern_type, pattern in SPOTIFY_PATTERNS.items():
+            match = pattern.match(query)
+            if match:
+                item_id = match.group(1)
 
-        if spotify_track_match:
-            track_id = spotify_track_match.group(1)
-            track_info = await get_spotify_track(track_id)
-            if not track_info:
-                return await interaction.followup.send("❌ Failed to fetch track")
+                if pattern_type == 'track':
+                    track_info = await get_spotify_track(item_id)
+                    if not track_info:
+                        return await interaction.followup.send("❌ Failed to fetch track")
 
-            youtube_info = await get_youtube_url(track_info['search_query'])
-            if not youtube_info:
-                return await interaction.followup.send("❌ Couldn't find track")
-
-            song = {'url': youtube_info['url'], 'title': track_info['title']}
-
-        elif spotify_playlist_match:
-            playlist_id = spotify_playlist_match.group(1)
-            tracks = await get_spotify_playlist(playlist_id)
-
-            if not tracks:
-                return await interaction.followup.send("❌ Empty or invalid playlist")
-
-            await interaction.followup.send(f"✅ Found {len(tracks)} tracks")
-
-            first_track = tracks[0]
-            youtube_info = await get_youtube_url(first_track['search_query'])
-
-            if not youtube_info:
-                if len(tracks) > 1:
-                    first_track = tracks[1]
-                    youtube_info = await get_youtube_url(first_track['search_query'])
+                    youtube_info = await get_youtube_url(track_info['search_query'])
                     if not youtube_info:
-                        return await interaction.followup.send("❌ Cannot find tracks")
-                    tracks = tracks[2:]
-                else:
-                    return await interaction.followup.send("❌ Cannot find tracks")
-            else:
-                tracks = tracks[1:]
+                        return await interaction.followup.send("❌ Couldn't find track")
 
-            song = {'url': youtube_info['url'], 'title': first_track['title']}
-            asyncio.create_task(process_spotify_tracks(
-                tracks, guild_id, interaction.channel))
+                    song = {'url': youtube_info['url'], 'title': track_info['title']}
 
-        elif spotify_album_match:
-            album_id = spotify_album_match.group(1)
-            tracks = await get_spotify_album(album_id)
+                elif pattern_type == 'playlist':
+                    tracks = await get_spotify_playlist(item_id)
+                    song, msg = await _handle_spotify_collection(tracks, guild_id, interaction.channel)
+                    if not song:
+                        return await interaction.followup.send(msg)
+                    await interaction.followup.send(msg)
 
-            if not tracks:
-                return await interaction.followup.send("❌ Empty or invalid album")
+                elif pattern_type == 'album':
+                    tracks = await get_spotify_album(item_id)
+                    song, msg = await _handle_spotify_collection(tracks, guild_id, interaction.channel)
+                    if not song:
+                        return await interaction.followup.send(msg)
+                    await interaction.followup.send(msg)
 
-            await interaction.followup.send(f"✅ Found {len(tracks)} tracks")
+                break
 
-            first_track = tracks[0]
-            youtube_info = await get_youtube_url(first_track['search_query'])
-
-            if not youtube_info:
-                if len(tracks) > 1:
-                    first_track = tracks[1]
-                    youtube_info = await get_youtube_url(first_track['search_query'])
-                    if not youtube_info:
-                        return await interaction.followup.send("❌ Cannot find tracks")
-                    tracks = tracks[2:]
-                else:
-                    return await interaction.followup.send("❌ Cannot find tracks")
-            else:
-                tracks = tracks[1:]
-
-            song = {'url': youtube_info['url'], 'title': first_track['title']}
-            asyncio.create_task(process_spotify_tracks(
-                tracks, guild_id, interaction.channel))
-
-        else:
+        if not song:
             youtube_info = await get_youtube_url(query)
             if not youtube_info:
                 return await interaction.followup.send("❌ Nothing found")
-
             song = youtube_info
 
         if voice_client.is_playing() or voice_client.is_paused():
             add_to_queue(guild_id, song)
             await interaction.followup.send(f"✅ Added to queue: **{song['title']}**")
         else:
-            success = await play_track(voice_client, song, guild_id)
-            if success:
+            source = await play_track(voice_client, song, guild_id)
+            if source:
+                voice_client.play(source, after=_create_after_callback(voice_client, guild_id, interaction.channel))
                 await interaction.followup.send(f"🎵 Now playing: **{song['title']}**")
             else:
                 await interaction.followup.send("❌ Error playing track")
 
-            def after_callback(e):
-                if e:
-                    print(f'Player error: {e}')
-                asyncio.run_coroutine_threadsafe(
-                    check_queue(guild_id, interaction.channel),
-                    asyncio.get_event_loop()
-                )
-
-            voice_client.play(voice_client.source, after=after_callback)
-
-    # Stop command
     @bot.tree.command(name="stop", description="Stop playback and clear queue")
     async def stop(interaction: discord.Interaction):
         await interaction.response.defer()
@@ -153,13 +131,11 @@ def register_commands(bot):
             if voice_client.is_playing() or voice_client.is_paused():
                 voice_client.stop()
             await voice_client.disconnect()
-
             clear_queue(interaction.guild_id)
             await interaction.followup.send("⏹️ Stopped and cleared queue")
         else:
             await interaction.followup.send("❌ Not in a voice channel")
 
-    # Skip command
     @bot.tree.command(name="skip", description="Skip to next song")
     async def skip(interaction: discord.Interaction):
         await interaction.response.defer()
@@ -171,7 +147,6 @@ def register_commands(bot):
         else:
             await interaction.followup.send("❌ Nothing playing")
 
-    # Queue command
     @bot.tree.command(name="queue", description="Show current queue")
     async def queue_cmd(interaction: discord.Interaction):
         await interaction.response.defer()
@@ -181,23 +156,18 @@ def register_commands(bot):
             embed = discord.Embed(title="🎵 Queue", color=discord.Color.blue())
 
             for i, song in enumerate(queues[guild_id][:MAX_QUEUE_DISPLAY], 1):
-                if i == 1:
-                    embed.add_field(
-                        name="Next:", value=f"**{song['title']}**", inline=False)
-                else:
-                    embed.add_field(
-                        name=f"{i}.", value=f"{song['title']}", inline=False)
+                name = "Next:" if i == 1 else f"{i}."
+                value = f"**{song['title']}**" if i == 1 else song['title']
+                embed.add_field(name=name, value=value, inline=False)
 
             remaining = len(queues[guild_id]) - MAX_QUEUE_DISPLAY
             if remaining > 0:
-                embed.add_field(
-                    name="", value=f"*And {remaining} more...*", inline=False)
+                embed.add_field(name="", value=f"*And {remaining} more...*", inline=False)
 
             await interaction.followup.send(embed=embed)
         else:
             await interaction.followup.send("📋 Queue is empty")
 
-    # Pause command
     @bot.tree.command(name="pause", description="Pause playback")
     async def pause(interaction: discord.Interaction):
         await interaction.response.defer()
@@ -209,7 +179,6 @@ def register_commands(bot):
         else:
             await interaction.followup.send("❌ Nothing playing")
 
-    # Resume command
     @bot.tree.command(name="resume", description="Resume playback")
     async def resume(interaction: discord.Interaction):
         await interaction.response.defer()
@@ -221,7 +190,6 @@ def register_commands(bot):
         else:
             await interaction.followup.send("❌ Nothing paused")
 
-    # Seek command
     @bot.tree.command(name="seek", description="Jump to position in song")
     @discord.app_commands.describe(position="Time position (seconds or mm:ss)")
     async def seek(interaction: discord.Interaction, position: str):
@@ -247,17 +215,12 @@ def register_commands(bot):
         else:
             await interaction.followup.send("❌ Nothing playing")
 
-    # Ping command
     @bot.tree.command(name="ping", description="Check bot latency")
     async def ping(interaction: discord.Interaction):
         await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms")
 
-    # Cut command
     @bot.tree.command(name="cut", description="Cut a section of current song")
-    @discord.app_commands.describe(
-        start="Start time (seconds or mm:ss)",
-        end="End time (seconds or mm:ss)"
-    )
+    @discord.app_commands.describe(start="Start time (seconds or mm:ss)", end="End time (seconds or mm:ss)")
     async def cut(interaction: discord.Interaction, start: str, end: str):
         await interaction.response.defer()
         voice_client = interaction.guild.voice_client
@@ -288,8 +251,7 @@ def register_commands(bot):
                 return await interaction.followup.send(f"❌ Failed to create clip: {temp_dir}")
 
             clip_duration = end_sec - start_sec
-            file = discord.File(
-                output_path, filename=f"clip_{clip_duration}s.mp3")
+            file = discord.File(output_path, filename=f"clip_{clip_duration}s.mp3")
             await interaction.followup.send("✅ Here's your clip!", file=file)
 
         except Exception as e:
@@ -298,10 +260,9 @@ def register_commands(bot):
             if 'temp_dir' in locals():
                 cleanup_temp_dir(temp_dir)
 
-    # Download command
     @bot.tree.command(name="download", description="Download audio")
     @discord.app_commands.describe(query="URL or search term")
-    async def download(interaction: discord.Interaction, query: str):
+    async def download_cmd(interaction: discord.Interaction, query: str):
         await interaction.response.defer()
 
         spotify_track_match = SPOTIFY_PATTERNS['track'].match(query)
@@ -344,101 +305,69 @@ def register_commands(bot):
         filename = f"{title.replace(' ', '_')[:40]}.mp3"
         file = discord.File(output_path, filename=filename)
 
-        await interaction.followup.send(
-            f"✅ Download complete ({file_size/1024/1024:.1f}MB)",
-            file=file
-        )
+        await interaction.followup.send(f"✅ Download complete ({file_size/1024/1024:.1f}MB)", file=file)
         cleanup_temp_dir(temp_dir)
 
-    @bot.command(name="play")
-    async def play_text(ctx, *, query: str):
-        class MinimalInteraction:
-            def __init__(self, ctx):
-                self.guild_id = ctx.guild.id
-                self.guild = ctx.guild
-                self.channel = ctx.channel
-                self.user = ctx.author
-                self.followup = ctx
+    class TextInteraction:
+        def __init__(self, ctx):
+            self.guild_id = ctx.guild.id if ctx.guild else None
+            self.guild = ctx.guild
+            self.channel = ctx.channel
+            self.user = ctx.author
+            self.response = self
+            self.voice_client = ctx.guild.voice_client if ctx.guild else None
 
-            async def response(self):
-                return self
+        async def defer(self, **kwargs):
+            pass
 
-            async def defer(self, ephemeral=False):
-                pass
+        class Followup:
+            def __init__(self, channel):
+                self.channel = channel
 
-            async def send_message(self, content, file=None):
+            async def send(self, content=None, file=None, embed=None):
                 if file:
                     await self.channel.send(content, file=file)
+                elif embed:
+                    await self.channel.send(embed=embed)
                 else:
                     await self.channel.send(content)
 
-        interaction = MinimalInteraction(ctx)
-        await play(interaction, query)
+        @property
+        def followup(self):
+            return self.Followup(self.channel)
 
-    # More text commands
-    for cmd_name in ["stop", "skip", "queue", "pause", "resume", "ping"]:
-        @bot.command(name=cmd_name)
-        async def cmd_wrapper(ctx, cmd_name=cmd_name):
-            cmd = bot.tree.get_command(cmd_name)
+    @bot.command(name="play")
+    async def play_text(ctx, *, query: str):
+        await play(TextInteraction(ctx), query)
 
-            class MinimalInteraction:
-                def __init__(self, ctx):
-                    self.guild_id = ctx.guild.id
-                    self.guild = ctx.guild
-                    self.channel = ctx.channel
-                    self.user = ctx.author
-                    self.followup = ctx
-                    self.response = self
+    @bot.command(name="stop")
+    async def stop_text(ctx):
+        await stop(TextInteraction(ctx))
 
-                async def defer(self, ephemeral=False):
-                    pass
+    @bot.command(name="skip")
+    async def skip_text(ctx):
+        await skip(TextInteraction(ctx))
 
-                async def send_message(self, content):
-                    await self.channel.send(content)
+    @bot.command(name="queue")
+    async def queue_text(ctx):
+        await queue_cmd(TextInteraction(ctx))
 
-            interaction = MinimalInteraction(ctx)
-            await globals()[cmd_name](interaction)
+    @bot.command(name="pause")
+    async def pause_text(ctx):
+        await pause(TextInteraction(ctx))
+
+    @bot.command(name="resume")
+    async def resume_text(ctx):
+        await resume(TextInteraction(ctx))
+
+    @bot.command(name="ping")
+    async def ping_text(ctx):
+        await ping(TextInteraction(ctx))
 
     @bot.command(name="cut")
     async def cut_text(ctx, start: str, end: str):
-        class MinimalInteraction:
-            def __init__(self, ctx):
-                self.guild_id = ctx.guild.id
-                self.guild = ctx.guild
-                self.channel = ctx.channel
-                self.user = ctx.author
-                self.followup = ctx
-                self.response = self
-
-            async def defer(self, ephemeral=False):
-                pass
-
-        interaction = MinimalInteraction(ctx)
-        await cut(interaction, start, end)
+        await cut(TextInteraction(ctx), start, end)
 
     @bot.command(name="download")
     async def download_text(ctx, *, query: str):
-        class MinimalInteraction:
-            def __init__(self, ctx):
-                self.guild_id = ctx.guild.id if ctx.guild else None
-                self.guild = ctx.guild
-                self.channel = ctx.channel
-                self.user = ctx.author
-                self.followup = ctx
-                self.response = self
-
-            async def defer(self, ephemeral=False):
-                pass
-
-        interaction = MinimalInteraction(ctx)
-        await download(interaction, query)
-
-
-    async def on_ready():
-        try:
-            await bot.tree.sync()
-            print("✅ Commands synced")
-        except Exception as e:
-            print(f"❌ Failed to sync commands: {e}")
-
-    bot.add_listener(on_ready)
+        await download_cmd(TextInteraction(ctx), query)

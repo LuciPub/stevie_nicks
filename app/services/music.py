@@ -23,11 +23,10 @@ async def play_track(voice_client, track, guild_id):
             executable=FFMPEG_PATH
         )
         current_tracks[guild_id] = track
-        voice_client.play(source)
-        return True
+        return source
     except Exception as e:
         print(f"Error playing track: {e}")
-        return False
+        return None
 
 
 async def check_queue(guild_id, channel):
@@ -37,7 +36,8 @@ async def check_queue(guild_id, channel):
         voice_client = discord.utils.get(
             channel.guild.voice_clients, guild=channel.guild)
 
-        if not voice_client:
+        if not voice_client or not voice_client.is_connected():
+            clear_queue(guild_id)
             return False
 
         try:
@@ -51,17 +51,32 @@ async def check_queue(guild_id, channel):
             def after_callback(e):
                 if e:
                     print(f'Player error: {e}')
-                asyncio.run_coroutine_threadsafe(
-                    check_queue(guild_id, channel), asyncio.get_event_loop())
+
+                # Get the current event loop from the bot
+                try:
+                    loop = voice_client.loop if hasattr(voice_client, 'loop') else asyncio.new_event_loop()
+                    asyncio.run_coroutine_threadsafe(
+                        check_queue(guild_id, channel), loop)
+                except Exception as loop_error:
+                    print(f"Error scheduling next track: {loop_error}")
 
             voice_client.play(source, after=after_callback)
             await channel.send(f"🎵 Now playing: **{next_song['title']}**")
             return True
         except Exception as e:
             print(f"Error playing next track: {e}")
-            asyncio.run_coroutine_threadsafe(
-                check_queue(guild_id, channel), asyncio.get_event_loop())
+            # Try to play next song in queue if current failed
+            try:
+                loop = voice_client.loop if hasattr(voice_client, 'loop') else asyncio.new_event_loop()
+                asyncio.run_coroutine_threadsafe(
+                    check_queue(guild_id, channel), loop)
+            except:
+                pass
             return False
+    else:
+        # Queue is empty, cleanup
+        if guild_id in current_tracks:
+            del current_tracks[guild_id]
     return False
 
 

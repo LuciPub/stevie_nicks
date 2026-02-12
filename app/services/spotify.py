@@ -13,51 +13,43 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
     ))
 
 
+def _format_track(track):
+    artist = track.get('artists', [{}])[0].get('name', 'Unknown')
+    name = track.get('name', 'Unknown')
+    title = f"{artist} - {name}"
+    return {'title': title, 'search_query': title}
+
+
 async def get_spotify_track(track_id):
-    """Get track info from Spotify track ID"""
     if not sp:
         return None
     try:
         track = sp.track(track_id)
-        search_query = f"{track['artists'][0]['name']} - {track['name']}"
-        return {
-            'title': f"{track['artists'][0]['name']} - {track['name']}",
-            'search_query': search_query
-        }
+        return _format_track(track)
     except Exception as e:
         print(f"Error fetching Spotify track: {e}")
         return None
 
 
+def _extract_tracks(items):
+    tracks = []
+    for item in items:
+        track = item.get('track') if 'track' in item else item
+        if track:
+            tracks.append(_format_track(track))
+    return tracks
+
+
 async def get_spotify_playlist(playlist_id):
-    """Get tracks from Spotify playlist ID"""
     if not sp:
         return []
     try:
         results = sp.playlist_items(playlist_id)
-        tracks = []
-
-        for item in results['items']:
-            if 'track' in item and item['track']:
-                track = item['track']
-                artist = track['artists'][0]['name'] if track['artists'] else 'Unknown'
-                name = track['name'] if 'name' in track else 'Unknown'
-                tracks.append({
-                    'title': f"{artist} - {name}",
-                    'search_query': f"{artist} - {name}"
-                })
+        tracks = _extract_tracks(results['items'])
 
         while results['next'] and len(tracks) < 100:
             results = sp.next(results)
-            for item in results['items']:
-                if 'track' in item and item['track']:
-                    track = item['track']
-                    artist = track['artists'][0]['name'] if track['artists'] else 'Unknown'
-                    name = track['name'] if 'name' in track else 'Unknown'
-                    tracks.append({
-                        'title': f"{artist} - {name}",
-                        'search_query': f"{artist} - {name}"
-                    })
+            tracks.extend(_extract_tracks(results['items']))
 
         return tracks
     except Exception as e:
@@ -66,30 +58,15 @@ async def get_spotify_playlist(playlist_id):
 
 
 async def get_spotify_album(album_id):
-    """Get tracks from Spotify album ID"""
     if not sp:
         return []
     try:
         results = sp.album_tracks(album_id)
-        tracks = []
-
-        for track in results['items']:
-            artist = track['artists'][0]['name'] if track['artists'] else 'Unknown'
-            name = track['name'] if 'name' in track else 'Unknown'
-            tracks.append({
-                'title': f"{artist} - {name}",
-                'search_query': f"{artist} - {name}"
-            })
+        tracks = _extract_tracks(results['items'])
 
         while results['next']:
             results = sp.next(results)
-            for track in results['items']:
-                artist = track['artists'][0]['name'] if track['artists'] else 'Unknown'
-                name = track['name'] if 'name' in track else 'Unknown'
-                tracks.append({
-                    'title': f"{artist} - {name}",
-                    'search_query': f"{artist} - {name}"
-                })
+            tracks.extend(_extract_tracks(results['items']))
 
         return tracks
     except Exception as e:
@@ -98,7 +75,6 @@ async def get_spotify_album(album_id):
 
 
 async def process_spotify_tracks(tracks, guild_id, channel):
-    """Process and queue multiple Spotify tracks"""
     max_tracks = min(MAX_PLAYLIST_TRACKS, len(tracks))
 
     for track in tracks[:max_tracks]:
