@@ -8,7 +8,7 @@ from services.music import (
     queues, current_tracks, cycle_loop_mode, pop_history,
     skip_history_once, build_now_playing_embed, _format_duration
 )
-from services.database import get_recent, get_top_tracks, get_most_active
+from services.database import get_recent, get_top_tracks, get_most_active, log_event, get_user_status
 from services.youtube import get_youtube_url, search_youtube, resolve_youtube_entry
 from services.spotify import get_spotify_track, get_spotify_playlist, get_spotify_album, process_spotify_tracks
 from utils.audio import create_clip, download_audio, cleanup_temp_dir
@@ -203,9 +203,15 @@ def register_commands(bot):
     async def skip(interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         voice_client = interaction.guild.voice_client
+        guild_id = interaction.guild_id
 
         if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            track = current_tracks.get(guild_id)
             voice_client.stop()
+            try:
+                log_event(guild_id, interaction.user.id, 'skip', track['title'] if track else None)
+            except Exception:
+                pass
             await interaction.followup.send("⏭️ Skipped")
         else:
             await interaction.followup.send("❌ Nothing playing")
@@ -367,6 +373,76 @@ def register_commands(bot):
                 value=f"**{row['plays']}** tracks played",
                 inline=False
             )
+        await interaction.followup.send(embed=embed)
+
+    @bot.tree.command(name="like", description="Like the current track")
+    async def like(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild_id = interaction.guild_id
+        track = current_tracks.get(guild_id)
+        if not track:
+            return await interaction.followup.send("❌ Nothing playing")
+        try:
+            log_event(guild_id, interaction.user.id, 'like', track['title'])
+        except Exception:
+            pass
+        await interaction.followup.send(f"❤️ Liked **{track['title']}**")
+
+    @bot.tree.command(name="status", description="Your listening stats (last 30 days)")
+    @discord.app_commands.describe(user="User to check (default: yourself)")
+    async def status(interaction: discord.Interaction, user: discord.User = None):
+        await interaction.response.defer(ephemeral=True)
+        target = user or interaction.user
+        data = get_user_status(interaction.guild_id, target.id)
+
+        if not data:
+            return await interaction.followup.send(f"📋 No listening data for <@{target.id}> in the last 30 days")
+
+        embed = discord.Embed(
+            title=f"📊 Music Status — {target.display_name}",
+            color=discord.Color.blue()
+        )
+        embed.set_thumbnail(url=target.display_avatar.url)
+
+        embed.add_field(
+            name="Overview",
+            value=(
+                f"**{data['total_plays']}** plays · "
+                f"**{data['total_skips']}** skips · "
+                f"**{data['total_likes']}** likes"
+            ),
+            inline=False
+        )
+
+        embed.add_field(name="Skip Rate", value=f"{data['skip_rate']:.1f}%", inline=True)
+        embed.add_field(name="Like Rate", value=f"{data['like_rate']:.1f}%", inline=True)
+        embed.add_field(name="Repeat Rate", value=f"{data['repeat_rate']:.1f}%", inline=True)
+
+        if data['top_tracks']:
+            tracks_text = '\n'.join(
+                f"`{i}.` {row['track_title'][:45]} ({row['plays']}x)"
+                for i, row in enumerate(data['top_tracks'], 1)
+            )
+            embed.add_field(name="Top Tracks", value=tracks_text, inline=False)
+
+        if data['top_artists']:
+            artists_text = '\n'.join(
+                f"`{i}.` {row['artist'][:40]} ({row['plays']}x)"
+                for i, row in enumerate(data['top_artists'], 1)
+            )
+            embed.add_field(name="Top Artists", value=artists_text, inline=False)
+
+        labels = ['🌙 00-06', '🌅 06-12', '☀️ 12-18', '🌆 18-24']
+        blocks = data['hour_blocks']
+        total_h = sum(blocks) or 1
+        dist_lines = []
+        for label, count in zip(labels, blocks):
+            pct = count / total_h * 100
+            bar_len = round(pct / 10)
+            bar = '█' * bar_len + '░' * (10 - bar_len)
+            dist_lines.append(f"{label} {bar} {pct:.0f}%")
+        embed.add_field(name="Listening Hours", value='\n'.join(dist_lines), inline=False)
+
         await interaction.followup.send(embed=embed)
 
     @bot.tree.command(name="ping", description="Check bot latency")
@@ -568,3 +644,11 @@ def register_commands(bot):
     @bot.command(name="mostplayed")
     async def mostplayed_text(ctx):
         await mostplayed(TextInteraction(ctx))
+
+    @bot.command(name="like")
+    async def like_text(ctx):
+        await like(TextInteraction(ctx))
+
+    @bot.command(name="status")
+    async def status_text(ctx, user: discord.User = None):
+        await status(TextInteraction(ctx), user)
