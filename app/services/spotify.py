@@ -18,7 +18,17 @@ def _format_track(track):
     artist = track.get('artists', [{}])[0].get('name', 'Unknown')
     name = track.get('name', 'Unknown')
     title = f"{artist} - {name}"
-    return {'title': title, 'search_query': title}
+    duration = None
+    if track.get('duration_ms'):
+        duration = track['duration_ms'] // 1000
+    images = track.get('album', {}).get('images', [])
+    thumbnail = images[0]['url'] if images else None
+    return {
+        'title': title,
+        'search_query': title,
+        'duration': duration,
+        'thumbnail': thumbnail,
+    }
 
 
 async def get_spotify_track(track_id):
@@ -88,14 +98,16 @@ async def _resolve_track(track):
             return {
                 'url': youtube_info['url'],
                 'title': track['title'],
-                'webpage_url': youtube_info.get('webpage_url')
+                'webpage_url': youtube_info.get('webpage_url'),
+                'duration': track.get('duration') or youtube_info.get('duration'),
+                'thumbnail': track.get('thumbnail') or youtube_info.get('thumbnail'),
             }
     except Exception as e:
         print(f"Error processing track {track['title']}: {e}")
     return None
 
 
-async def process_spotify_tracks(tracks, guild_id, channel):
+async def process_spotify_tracks(tracks, guild_id, channel, user_id=0):
     max_tracks = min(MAX_PLAYLIST_TRACKS, len(tracks))
     batch_size = 5
     processed = 0
@@ -111,6 +123,7 @@ async def process_spotify_tracks(tracks, guild_id, channel):
             if isinstance(result, Exception) or result is None:
                 failed += 1
             else:
+                result['requested_by'] = user_id
                 add_to_queue(guild_id, result)
                 processed += 1
 

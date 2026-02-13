@@ -1,9 +1,15 @@
 import discord
 import asyncio
 import os
+import random
 
-from services.music import add_to_queue, start_player, clear_queue, parse_time, queues, current_tracks
-from services.youtube import get_youtube_url
+from services.music import (
+    add_to_queue, start_player, clear_queue, parse_time, seek_track,
+    queues, current_tracks, cycle_loop_mode, pop_history,
+    skip_history_once, build_now_playing_embed, _format_duration
+)
+from services.database import get_recent, get_top_tracks, get_most_active
+from services.youtube import get_youtube_url, search_youtube, resolve_youtube_entry
 from services.spotify import get_spotify_track, get_spotify_playlist, get_spotify_album, process_spotify_tracks
 from utils.audio import create_clip, download_audio, cleanup_temp_dir
 from utils.config import SPOTIFY_PATTERNS, MAX_QUEUE_DISPLAY, MAX_CLIP_LENGTH, MAX_FILE_SIZE
@@ -16,12 +22,14 @@ async def _get_first_valid_track(tracks):
             return {
                 'url': info['url'],
                 'title': track['title'],
-                'webpage_url': info.get('webpage_url')
+                'webpage_url': info.get('webpage_url'),
+                'duration': track.get('duration') or info.get('duration'),
+                'thumbnail': track.get('thumbnail') or info.get('thumbnail'),
             }, tracks[i+1:]
     return None, []
 
 
-async def _handle_spotify_collection(tracks, guild_id, channel):
+async def _handle_spotify_collection(tracks, guild_id, channel, user_id=0):
     if not tracks:
         return None, "❌ Empty or invalid collection"
 
@@ -29,9 +37,11 @@ async def _handle_spotify_collection(tracks, guild_id, channel):
     if not song:
         return None, "❌ Cannot find tracks"
 
+    song['requested_by'] = user_id
+
     if remaining:
         asyncio.create_task(process_spotify_tracks(
-            remaining, guild_id, channel))
+            remaining, guild_id, channel, user_id))
 
     return song, f"✅ Found {len(tracks)} tracks"
 
@@ -80,14 +90,16 @@ def register_commands(bot):
                     song = {
                         'url': youtube_info['url'],
                         'title': track_info['title'],
-                        'webpage_url': youtube_info.get('webpage_url')
+                        'webpage_url': youtube_info.get('webpage_url'),
+                        'duration': track_info.get('duration') or youtube_info.get('duration'),
+                        'thumbnail': track_info.get('thumbnail') or youtube_info.get('thumbnail'),
                     }
 
                 elif pattern_type == 'playlist':
                     tracks = await get_spotify_playlist(item_id)
                     if not tracks:
                         return await interaction.followup.send("❌ Failed to load playlist")
-                    song, msg = await _handle_spotify_collection(tracks, guild_id, interaction.channel)
+                    song, msg = await _handle_spotify_collection(tracks, guild_id, interaction.channel, interaction.user.id)
                     if not song:
                         return await interaction.followup.send(msg)
                     await interaction.followup.send(msg)
@@ -96,7 +108,7 @@ def register_commands(bot):
                     tracks = await get_spotify_album(item_id)
                     if not tracks:
                         return await interaction.followup.send("❌ Failed to load album")
-                    song, msg = await _handle_spotify_collection(tracks, guild_id, interaction.channel)
+                    song, msg = await _handle_spotify_collection(tracks, guild_id, interaction.channel, interaction.user.id)
                     if not song:
                         return await interaction.followup.send(msg)
                     await interaction.followup.send(msg)
@@ -104,10 +116,68 @@ def register_commands(bot):
                 break
 
         if not song:
-            youtube_info = await get_youtube_url(query)
-            if not youtube_info:
-                return await interaction.followup.send("❌ Nothing found")
-            song = youtube_info
+            is_url = query.startswith(('http://', 'https://'))
+
+            if is_url:
+                youtube_info = await get_youtube_url(query)
+                if not youtube_info:
+                    return await interaction.followup.send("❌ Nothing found")
+                song = youtube_info
+            else:
+                results = await search_youtube(query)
+                if not results:
+                    return await interaction.followup.send("❌ Nothing found")
+
+                number_emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣']
+                lines = []
+                for i, r in enumerate(results):
+                    dur = _format_duration(r.get('duration')) or '?:??'
+                    channel = r.get('channel', '')
+                    line = f"{number_emojis[i]} **{r['title']}**\n{channel} — `{dur}`"
+                    lines.append(line)
+
+                embed = discord.Embed(
+                    title=f"🔍 Results for: {query[:50]}",
+                    description='\n\n'.join(lines),
+                    color=discord.Color.blue()
+                )
+                embed.set_footer(text="React to choose a track (30s timeout)")
+
+                msg = await interaction.channel.send(embed=embed)
+                for i in range(len(results)):
+                    await msg.add_reaction(number_emojis[i])
+
+                def check(reaction, user):
+                    return (
+                        user == interaction.user
+                        and reaction.message.id == msg.id
+                        and str(reaction.emoji) in number_emojis[:len(results)]
+                    )
+
+                try:
+                    reaction, _ = await bot.wait_for('reaction_add', timeout=30.0, check=check)
+                    choice = number_emojis.index(str(reaction.emoji))
+                except asyncio.TimeoutError:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                    return await interaction.followup.send("⏱️ Selection timed out")
+
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+
+                chosen = results[choice]
+                await interaction.followup.send(f"🔍 Loading **{chosen['title']}**...")
+
+                youtube_info = await resolve_youtube_entry(chosen['webpage_url'])
+                if not youtube_info:
+                    return await interaction.followup.send("❌ Failed to load track")
+                song = youtube_info
+
+        song['requested_by'] = interaction.user.id
 
         if voice_client.is_playing() or voice_client.is_paused():
             add_to_queue(guild_id, song)
@@ -191,24 +261,113 @@ def register_commands(bot):
         voice_client = interaction.guild.voice_client
         guild_id = interaction.guild_id
 
-        if voice_client and voice_client.is_playing() and guild_id in current_tracks:
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()) and guild_id in current_tracks:
             pos_sec = parse_time(position)
-            song = current_tracks[guild_id]
-
-            try:
-                source = discord.FFmpegPCMAudio(
-                    song['url'],
-                    before_options=f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {pos_sec}",
-                    options="-vn",
-                    executable='/usr/bin/ffmpeg'
-                )
-                voice_client.stop()
-                voice_client.play(source)
+            success = await seek_track(voice_client, guild_id, pos_sec)
+            if success:
                 await interaction.followup.send(f"▶️ Jumped to {position}")
-            except Exception:
+            else:
                 await interaction.followup.send("❌ Seek failed")
         else:
             await interaction.followup.send("❌ Nothing playing")
+
+    @bot.tree.command(name="loop", description="Cycle loop mode: off / track / queue")
+    async def loop(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        mode = cycle_loop_mode(interaction.guild_id)
+        labels = {'off': '➡️ Loop off', 'track': '🔂 Looping track', 'queue': '🔁 Looping queue'}
+        await interaction.followup.send(labels[mode])
+
+    @bot.tree.command(name="previous", description="Go back to the previous track")
+    async def previous(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        voice_client = interaction.guild.voice_client
+        guild_id = interaction.guild_id
+
+        if not voice_client or (not voice_client.is_playing() and not voice_client.is_paused()):
+            return await interaction.followup.send("❌ Nothing playing")
+
+        prev = pop_history(guild_id)
+        if not prev:
+            return await interaction.followup.send("❌ No previous track")
+
+        if guild_id not in queues:
+            queues[guild_id] = []
+        queues[guild_id].insert(0, prev)
+        skip_history_once(guild_id)
+        voice_client.stop()
+        await interaction.followup.send(f"⏮️ Going back to: **{prev['title']}**")
+
+    @bot.tree.command(name="shuffle", description="Shuffle the queue")
+    async def shuffle(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild_id = interaction.guild_id
+
+        if guild_id in queues and queues[guild_id]:
+            random.shuffle(queues[guild_id])
+            await interaction.followup.send(f"🔀 Shuffled {len(queues[guild_id])} tracks")
+        else:
+            await interaction.followup.send("📋 Queue is empty")
+
+    @bot.tree.command(name="nowplaying", description="Show current track info")
+    async def nowplaying(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        track = current_tracks.get(interaction.guild_id)
+        if not track:
+            return await interaction.followup.send("❌ Nothing playing")
+        embed = build_now_playing_embed(track)
+        await interaction.followup.send(embed=embed)
+
+    @bot.tree.command(name="recent", description="Show recently played tracks")
+    async def recent(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        rows = get_recent(interaction.guild_id)
+        if not rows:
+            return await interaction.followup.send("📋 No play history yet")
+
+        embed = discord.Embed(title="🕐 Recently Played", color=discord.Color.blue())
+        for row in rows:
+            user_tag = f"<@{row['user_id']}>" if row['user_id'] else "Unknown"
+            played = row['played_at'][:16].replace('T', ' ')
+            embed.add_field(
+                name=row['track_title'][:100],
+                value=f"{user_tag} — {played}",
+                inline=False
+            )
+        await interaction.followup.send(embed=embed)
+
+    @bot.tree.command(name="toptracks", description="Show most played tracks")
+    async def toptracks(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        rows = get_top_tracks(interaction.guild_id)
+        if not rows:
+            return await interaction.followup.send("📋 No play history yet")
+
+        embed = discord.Embed(title="🏆 Top Tracks", color=discord.Color.gold())
+        for i, row in enumerate(rows, 1):
+            embed.add_field(
+                name=f"{i}. {row['track_title'][:100]}",
+                value=f"**{row['plays']}** plays",
+                inline=False
+            )
+        await interaction.followup.send(embed=embed)
+
+    @bot.tree.command(name="mostplayed", description="Show users who played the most")
+    async def mostplayed(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        rows = get_most_active(interaction.guild_id)
+        if not rows:
+            return await interaction.followup.send("📋 No play history yet")
+
+        embed = discord.Embed(title="🎧 Most Active DJs", color=discord.Color.purple())
+        for i, row in enumerate(rows, 1):
+            user_tag = f"<@{row['user_id']}>" if row['user_id'] else "Unknown"
+            embed.add_field(
+                name=f"{i}. {user_tag}",
+                value=f"**{row['plays']}** tracks played",
+                inline=False
+            )
+        await interaction.followup.send(embed=embed)
 
     @bot.tree.command(name="ping", description="Check bot latency")
     async def ping(interaction: discord.Interaction):
@@ -381,3 +540,31 @@ def register_commands(bot):
     @bot.command(name="download")
     async def download_text(ctx, *, query: str = None):
         await download_cmd(TextInteraction(ctx), query)
+
+    @bot.command(name="loop")
+    async def loop_text(ctx):
+        await loop(TextInteraction(ctx))
+
+    @bot.command(name="previous")
+    async def previous_text(ctx):
+        await previous(TextInteraction(ctx))
+
+    @bot.command(name="shuffle")
+    async def shuffle_text(ctx):
+        await shuffle(TextInteraction(ctx))
+
+    @bot.command(name="nowplaying")
+    async def nowplaying_text(ctx):
+        await nowplaying(TextInteraction(ctx))
+
+    @bot.command(name="recent")
+    async def recent_text(ctx):
+        await recent(TextInteraction(ctx))
+
+    @bot.command(name="toptracks")
+    async def toptracks_text(ctx):
+        await toptracks(TextInteraction(ctx))
+
+    @bot.command(name="mostplayed")
+    async def mostplayed_text(ctx):
+        await mostplayed(TextInteraction(ctx))

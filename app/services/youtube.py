@@ -67,9 +67,47 @@ async def refresh_url(webpage_url):
     return None
 
 
-async def get_youtube_url(search_query):
-    """Convert a search query to a YouTube URL and title"""
+async def search_youtube(query, max_results=5):
+    try:
+        info = await _extract_with_timeout(f'ytsearch{max_results}:{query}')
+        if 'entries' not in info:
+            return []
+        results = []
+        for entry in info['entries']:
+            if not entry:
+                continue
+            results.append({
+                'title': entry.get('title', 'Unknown'),
+                'webpage_url': entry.get('webpage_url', ''),
+                'duration': entry.get('duration'),
+                'thumbnail': entry.get('thumbnail'),
+                'channel': entry.get('channel', ''),
+            })
+        return results
+    except Exception as e:
+        print(f"Error searching YouTube: {e}")
+        return []
 
+
+async def resolve_youtube_entry(webpage_url):
+    try:
+        info = await _extract_with_timeout(webpage_url)
+        url = _get_best_audio_url(info)
+        if not url:
+            return None
+        return {
+            'url': url,
+            'title': info['title'],
+            'webpage_url': info.get('webpage_url', webpage_url),
+            'duration': info.get('duration'),
+            'thumbnail': info.get('thumbnail'),
+        }
+    except Exception as e:
+        print(f"Error resolving YouTube entry: {e}")
+        return None
+
+
+async def get_youtube_url(search_query):
     yt_query = (
         f'ytsearch:{search_query}'
         if not search_query.startswith(('http://', 'https://'))
@@ -106,7 +144,9 @@ async def get_youtube_url(search_query):
         return {
             'url': url,
             'title': info['title'],
-            'webpage_url': info.get('webpage_url', yt_query)
+            'webpage_url': info.get('webpage_url', yt_query),
+            'duration': info.get('duration'),
+            'thumbnail': info.get('thumbnail'),
         }
 
     except Exception as e:
